@@ -1,0 +1,808 @@
+name: Build APK
+
+on:
+  push:
+    branches: [ main ]
+    tags: [ 'v*' ]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+
+      - name: Tulis berkas proyek
+        run: |
+          set -e
+          rm -rf app
+          mkdir -p app/src/main/java/id/sch/urwahbinzubair/khusus app/src/main/res/values app/src/main/res/layout app/src/main/res/drawable app/src/main/assets
+
+          cat > settings.gradle <<'CLAUDE_EOF'
+          pluginManagement {
+              repositories { google(); mavenCentral(); gradlePluginPortal() }
+          }
+          dependencyResolutionManagement {
+              repositories { google(); mavenCentral() }
+          }
+          rootProject.name = "APKKhusus"
+          include ':app'
+          CLAUDE_EOF
+
+          cat > build.gradle <<'CLAUDE_EOF'
+          plugins {
+              id 'com.android.application' version '8.6.1' apply false
+          }
+          CLAUDE_EOF
+
+          cat > gradle.properties <<'CLAUDE_EOF'
+          org.gradle.jvmargs=-Xmx2048m
+          android.useAndroidX=true
+          android.nonTransitiveRClass=true
+          CLAUDE_EOF
+
+          cat > app/build.gradle <<'CLAUDE_EOF'
+          plugins { id 'com.android.application' }
+
+          android {
+              namespace 'id.sch.urwahbinzubair.khusus'
+              compileSdk 35
+
+              defaultConfig {
+                  applicationId "id.sch.urwahbinzubair.khusus"
+                  minSdk 24
+                  targetSdk 35
+                  versionCode 1
+                  versionName "1.0"
+
+                  // Sumber daftar menu (JSON). Boleh dikosongkan -> pakai assets/menu.json saja.
+                  buildConfigField "String", "MENU_URL", "\"${project.findProperty('MENU_URL') ?: ''}\""
+                  // Repo GitHub untuk cek pembaruan aplikasi. Kosongkan untuk menonaktifkan.
+                  buildConfigField "String", "UPDATE_REPO", "\"${project.findProperty('UPDATE_REPO') ?: ''}\""
+              }
+
+              signingConfigs {
+                  release {
+                      def ksFile = System.getenv("KEYSTORE_FILE") ?: project.findProperty('KEYSTORE_FILE')
+                      if (ksFile) {
+                          storeFile file(ksFile)
+                          storePassword System.getenv("KEYSTORE_PASSWORD") ?: project.findProperty('KEYSTORE_PASSWORD')
+                          keyAlias System.getenv("KEY_ALIAS") ?: project.findProperty('KEY_ALIAS')
+                          keyPassword System.getenv("KEY_PASSWORD") ?: project.findProperty('KEY_PASSWORD')
+                      }
+                  }
+              }
+
+              buildTypes {
+                  release {
+                      minifyEnabled false
+                      def ksFile = System.getenv("KEYSTORE_FILE") ?: project.findProperty('KEYSTORE_FILE')
+                      if (ksFile) { signingConfig signingConfigs.release }
+                  }
+              }
+
+              buildFeatures { buildConfig true }
+
+              compileOptions {
+                  sourceCompatibility JavaVersion.VERSION_17
+                  targetCompatibility JavaVersion.VERSION_17
+              }
+          }
+          CLAUDE_EOF
+
+          cat > app/src/main/AndroidManifest.xml <<'CLAUDE_EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+              <uses-permission android:name="android.permission.INTERNET" />
+              <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+
+              <application
+                  android:allowBackup="true"
+                  android:icon="@drawable/ic_launcher"
+                  android:roundIcon="@drawable/ic_launcher"
+                  android:label="@string/app_name"
+                  android:supportsRtl="true"
+                  android:usesCleartextTraffic="false"
+                  android:theme="@style/AppTheme">
+
+                  <activity
+                      android:name=".MainActivity"
+                      android:exported="true"
+                      android:configChanges="orientation|screenSize|keyboardHidden|uiMode"
+                      android:launchMode="singleTop"
+                      android:windowSoftInputMode="adjustResize">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+                  </activity>
+              </application>
+          </manifest>
+          CLAUDE_EOF
+
+          cat > app/src/main/java/id/sch/urwahbinzubair/khusus/MainActivity.java <<'CLAUDE_EOF'
+          package id.sch.urwahbinzubair.khusus;
+
+          import android.annotation.SuppressLint;
+          import android.app.Activity;
+          import android.app.AlertDialog;
+          import android.content.ActivityNotFoundException;
+          import android.content.Intent;
+          import android.content.SharedPreferences;
+          import android.net.Uri;
+          import android.os.Build;
+          import android.os.Bundle;
+          import android.os.Handler;
+          import android.os.Looper;
+          import android.print.PrintAttributes;
+          import android.print.PrintManager;
+          import android.text.TextUtils;
+          import android.view.View;
+          import android.webkit.CookieManager;
+          import android.webkit.JavascriptInterface;
+          import android.webkit.ValueCallback;
+          import android.webkit.WebChromeClient;
+          import android.webkit.WebResourceRequest;
+          import android.webkit.WebSettings;
+          import android.webkit.WebView;
+          import android.webkit.WebViewClient;
+          import android.widget.Button;
+          import android.widget.ProgressBar;
+          import android.widget.TextView;
+          import android.widget.Toast;
+
+          import org.json.JSONArray;
+          import org.json.JSONObject;
+
+          import java.io.ByteArrayOutputStream;
+          import java.io.InputStream;
+          import java.net.HttpURLConnection;
+          import java.net.URL;
+          import java.util.ArrayList;
+          import java.util.List;
+          import java.util.concurrent.ExecutorService;
+          import java.util.concurrent.Executors;
+
+          public class MainActivity extends Activity {
+
+              private static final String PREFS = "portal_prefs";
+              private static final String KEY_MENU = "menu_json";
+              private static final String HOME_BASE = "https://menu.local/";
+              private static final int REQ_FILE = 1001;
+
+              private WebView webView;
+              private ProgressBar progress;
+              private View toolbar;
+              private TextView tvTitle;
+
+              private final List<Item> items = new ArrayList<>();
+              private String homeTitle = "";
+              private String homeHint = "";
+              private String homeFooter = "";
+              private boolean onHome = true;
+              private String currentItemUrl = null;
+              private boolean loginPromptShown = false;
+
+              private ValueCallback<Uri[]> filePathCallback;
+              private final ExecutorService io = Executors.newSingleThreadExecutor();
+              private final Handler ui = new Handler(Looper.getMainLooper());
+
+              static class Item {
+                  String title = "", subtitle = "", icon = "", url = "", open = "webview";
+              }
+
+              @SuppressLint({"SetJavaScriptEnabled", "AddJavascriptInterface"})
+              @Override
+              protected void onCreate(Bundle savedInstanceState) {
+                  super.onCreate(savedInstanceState);
+                  setContentView(R.layout.activity_main);
+
+                  webView = findViewById(R.id.webView);
+                  progress = findViewById(R.id.progress);
+                  toolbar = findViewById(R.id.toolbar);
+                  tvTitle = findViewById(R.id.tvTitle);
+                  Button btnHome = findViewById(R.id.btnHome);
+                  Button btnBrowser = findViewById(R.id.btnBrowser);
+
+                  btnHome.setOnClickListener(v -> showHome());
+                  btnBrowser.setOnClickListener(v -> {
+                      String url = webView.getUrl();
+                      if (url != null && url.startsWith("http")) openExternal(url);
+                  });
+
+                  WebSettings s = webView.getSettings();
+                  s.setJavaScriptEnabled(true);
+                  s.setDomStorageEnabled(true);
+                  s.setDatabaseEnabled(true);
+                  s.setLoadWithOverviewMode(true);
+                  s.setUseWideViewPort(true);
+                  s.setBuiltInZoomControls(true);
+                  s.setDisplayZoomControls(false);
+                  s.setJavaScriptCanOpenWindowsAutomatically(true);
+                  s.setSupportMultipleWindows(true);
+                  s.setMediaPlaybackRequiresUserGesture(false);
+                  s.setMixedContentMode(WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE);
+
+                  CookieManager.getInstance().setAcceptCookie(true);
+                  CookieManager.getInstance().setAcceptThirdPartyCookies(webView, true);
+
+                  webView.addJavascriptInterface(new PrintBridge(), "AndroidPrint");
+                  webView.setWebViewClient(new Client());
+                  webView.setWebChromeClient(new Chrome());
+                  webView.setDownloadListener((url, ua, cd, mime, len) -> openExternal(url));
+
+                  loadMenuFromCacheOrAssets();
+                  showHome();
+                  refreshMenuFromNetwork();
+                  checkUpdate();
+              }
+
+              /* ---------------- Menu ---------------- */
+
+              private void loadMenuFromCacheOrAssets() {
+                  SharedPreferences p = getSharedPreferences(PREFS, MODE_PRIVATE);
+                  String json = p.getString(KEY_MENU, null);
+                  if (json == null) json = readAsset("menu.json");
+                  parseMenu(json);
+              }
+
+              private void refreshMenuFromNetwork() {
+                  final String url = BuildConfig.MENU_URL;
+                  if (TextUtils.isEmpty(url)) return;
+                  io.execute(() -> {
+                      final String body = httpGet(url);
+                      if (body == null) return;
+                      try {
+                          new JSONObject(body); // validasi
+                      } catch (Exception e) {
+                          return;
+                      }
+                      ui.post(() -> {
+                          getSharedPreferences(PREFS, MODE_PRIVATE).edit().putString(KEY_MENU, body).apply();
+                          parseMenu(body);
+                          if (onHome) showHome();
+                      });
+                  });
+              }
+
+              private void parseMenu(String json) {
+                  items.clear();
+                  homeTitle = getString(R.string.home_title);
+                  homeHint = getString(R.string.home_hint);
+                  homeFooter = getString(R.string.footer);
+                  if (json == null) return;
+                  try {
+                      JSONObject o = new JSONObject(json);
+                      homeTitle = o.optString("title", homeTitle);
+                      homeHint = o.optString("hint", homeHint);
+                      homeFooter = o.optString("footer", homeFooter);
+                      JSONArray arr = o.optJSONArray("items");
+                      if (arr != null) {
+                          for (int i = 0; i < arr.length(); i++) {
+                              JSONObject j = arr.optJSONObject(i);
+                              if (j == null) continue;
+                              String url = j.optString("url", "").trim();
+                              if (TextUtils.isEmpty(url)) continue;
+                              if (!j.optBoolean("active", true)) continue;
+                              Item it = new Item();
+                              it.title = j.optString("title", "Menu");
+                              it.subtitle = j.optString("subtitle", "");
+                              it.icon = j.optString("icon", "•");
+                              it.url = url;
+                              it.open = j.optString("open", "webview");
+                              items.add(it);
+                          }
+                      }
+                  } catch (Exception ignored) {
+                  }
+              }
+
+              /* ---------------- Tampilan beranda ---------------- */
+
+              private void showHome() {
+                  onHome = true;
+                  toolbar.setVisibility(View.GONE);
+                  webView.loadDataWithBaseURL(HOME_BASE, buildHomeHtml(), "text/html", "UTF-8", null);
+                  webView.clearHistory();
+              }
+
+              private String buildHomeHtml() {
+                  StringBuilder sb = new StringBuilder();
+                  sb.append("<!doctype html><html lang='id'><head><meta charset='utf-8'>")
+                    .append("<meta name='viewport' content='width=device-width,initial-scale=1,viewport-fit=cover'>")
+                    .append("<style>")
+                    .append("*{box-sizing:border-box}html,body{margin:0;min-height:100%;font-family:sans-serif;background:#f7f2ed;color:#35181b}")
+                    .append("body{padding:24px 18px 32px}main{max-width:560px;margin:auto}")
+                    .append(".brand{text-align:center;margin-bottom:22px}")
+                    .append(".logo{display:grid;place-items:center;width:88px;height:88px;margin:auto;border-radius:24px;background:#f4dfb5;font-size:40px}")
+                    .append("h1{margin:16px 0 4px;font-size:27px;line-height:1.2}")
+                    .append(".hint{margin:0;color:#766367;font-size:14px}")
+                    .append(".card{display:flex;align-items:center;gap:12px;margin:12px 0;padding:18px;border:1px solid #eadbd3;border-radius:20px;background:#fff;color:#35181b;text-decoration:none;box-shadow:0 8px 22px #35181b12}")
+                    .append(".card:active{transform:scale(.985);background:#fff9f5}")
+                    .append(".icon{display:grid;place-items:center;min-width:44px;height:44px;border-radius:13px;background:#f4dfb5;font-size:21px}")
+                    .append(".title{display:block;font-size:18px;font-weight:700;line-height:1.3}")
+                    .append(".sub{display:block;margin-top:4px;color:#806e70;font-size:13px;line-height:1.4}")
+                    .append(".empty{padding:20px;border-radius:16px;background:#fff;color:#806e70;font-size:14px;text-align:center}")
+                    .append(".footer{text-align:center;margin-top:22px;color:#98888a;font-size:12px}")
+                    .append("</style></head><body><main>")
+                    .append("<div class='brand'><div class='logo'>🎓</div><h1>").append(esc(homeTitle))
+                    .append("</h1><p class='hint'>").append(esc(homeHint)).append("</p></div>");
+
+                  if (items.isEmpty()) {
+                      sb.append("<div class='empty'>Belum ada menu. Periksa koneksi internet atau atur daftar menu di sumber data.</div>");
+                  }
+                  for (int i = 0; i < items.size(); i++) {
+                      Item it = items.get(i);
+                      sb.append("<a class='card' href='app://open/").append(i).append("'>")
+                        .append("<span class='icon'>").append(esc(it.icon)).append("</span>")
+                        .append("<span><span class='title'>").append(esc(it.title)).append("</span>");
+                      if (!TextUtils.isEmpty(it.subtitle)) {
+                          sb.append("<span class='sub'>").append(esc(it.subtitle)).append("</span>");
+                      }
+                      sb.append("</span></a>");
+                  }
+                  sb.append("<p class='footer'>").append(esc(homeFooter)).append(" · v")
+                    .append(BuildConfig.VERSION_NAME).append("</p></main></body></html>");
+                  return sb.toString();
+              }
+
+              private static String esc(String s) {
+                  if (s == null) return "";
+                  return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace("'", "&#39;");
+              }
+
+              private void openItem(int index) {
+                  if (index < 0 || index >= items.size()) return;
+                  Item it = items.get(index);
+                  if ("browser".equalsIgnoreCase(it.open)) {
+                      openExternal(it.url);
+                      return;
+                  }
+                  onHome = false;
+                  loginPromptShown = false;
+                  currentItemUrl = it.url;
+                  toolbar.setVisibility(View.VISIBLE);
+                  tvTitle.setText(it.title);
+                  webView.loadUrl(it.url);
+              }
+
+              private void promptLoginInBrowser() {
+                  if (loginPromptShown || currentItemUrl == null) return;
+                  loginPromptShown = true;
+                  new AlertDialog.Builder(this)
+                      .setTitle("Perlu login akun sekolah")
+                      .setMessage("Halaman ini meminta login akun Google. Google tidak mengizinkan login "
+                          + "di dalam aplikasi, jadi tautannya perlu dibuka di browser HP.")
+                      .setPositiveButton("Buka di browser", (d, w) -> {
+                          String target = currentItemUrl;
+                          showHome();
+                          openExternal(target);
+                      })
+                      .setNegativeButton("Batal", (d, w) -> showHome())
+                      .setCancelable(false)
+                      .show();
+              }
+
+              private void openExternal(String url) {
+                  try {
+                      startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(url)));
+                  } catch (ActivityNotFoundException e) {
+                      Toast.makeText(this, "Tidak ada aplikasi untuk membuka tautan ini", Toast.LENGTH_SHORT).show();
+                  }
+              }
+
+              /* ---------------- WebView clients ---------------- */
+
+              private class Client extends WebViewClient {
+                  @Override
+                  public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest request) {
+                      return handle(request.getUrl().toString());
+                  }
+
+                  @SuppressWarnings("deprecation")
+                  @Override
+                  public boolean shouldOverrideUrlLoading(WebView view, String url) {
+                      return handle(url);
+                  }
+
+                  private boolean handle(String url) {
+                      if (url.startsWith("app://open/")) {
+                          try {
+                              openItem(Integer.parseInt(url.substring("app://open/".length())));
+                          } catch (NumberFormatException ignored) {
+                          }
+                          return true;
+                      }
+                      if (url.startsWith("http://") || url.startsWith("https://")) {
+                          onHome = false;
+                          toolbar.setVisibility(View.VISIBLE);
+                          return false;
+                      }
+                      openExternal(url); // tel:, mailto:, whatsapp:, intent:
+                      return true;
+                  }
+
+                  @Override
+                  public void onPageStarted(WebView view, String url, android.graphics.Bitmap favicon) {
+                      if (url != null && (url.startsWith("https://accounts.google.com")
+                              || url.contains("disallowed_useragent"))) {
+                          promptLoginInBrowser();
+                      }
+                  }
+
+                  @Override
+                  public void onPageFinished(WebView view, String url) {
+                      // window.print() -> dialog cetak Android
+                      view.evaluateJavascript(
+                          "(function(){if(!window.__apShim){window.__apShim=1;window.print=function(){"
+                              + "try{AndroidPrint.printPage();}catch(e){}};}})();", null);
+                      if (!onHome && TextUtils.isEmpty(tvTitle.getText())) {
+                          tvTitle.setText(view.getTitle());
+                      }
+                  }
+              }
+
+              private class Chrome extends WebChromeClient {
+                  @Override
+                  public void onProgressChanged(WebView view, int newProgress) {
+                      progress.setProgress(newProgress);
+                      progress.setVisibility(newProgress < 100 ? View.VISIBLE : View.GONE);
+                  }
+
+                  @Override
+                  public boolean onCreateWindow(WebView view, boolean isDialog, boolean isUserGesture, android.os.Message resultMsg) {
+                      WebView helper = new WebView(MainActivity.this);
+                      helper.setWebViewClient(new WebViewClient() {
+                          @Override
+                          public boolean shouldOverrideUrlLoading(WebView v, WebResourceRequest req) {
+                              webView.loadUrl(req.getUrl().toString());
+                              return true;
+                          }
+                      });
+                      WebView.WebViewTransport t = (WebView.WebViewTransport) resultMsg.obj;
+                      t.setWebView(helper);
+                      resultMsg.sendToTarget();
+                      return true;
+                  }
+
+                  @Override
+                  public boolean onShowFileChooser(WebView view, ValueCallback<Uri[]> cb, FileChooserParams params) {
+                      if (filePathCallback != null) filePathCallback.onReceiveValue(null);
+                      filePathCallback = cb;
+                      try {
+                          startActivityForResult(params.createIntent(), REQ_FILE);
+                          return true;
+                      } catch (Exception e) {
+                          filePathCallback = null;
+                          return false;
+                      }
+                  }
+              }
+
+              public class PrintBridge {
+                  @JavascriptInterface
+                  public void printPage() {
+                      ui.post(() -> {
+                          try {
+                              PrintManager pm = (PrintManager) getSystemService(PRINT_SERVICE);
+                              String job = getString(R.string.app_name) + " Document";
+                              pm.print(job, webView.createPrintDocumentAdapter(job),
+                                  new PrintAttributes.Builder().build());
+                          } catch (Exception e) {
+                              Toast.makeText(MainActivity.this, "Cetak tidak tersedia", Toast.LENGTH_SHORT).show();
+                          }
+                      });
+                  }
+              }
+
+              @Override
+              protected void onActivityResult(int requestCode, int resultCode, Intent data) {
+                  if (requestCode == REQ_FILE) {
+                      if (filePathCallback != null) {
+                          Uri[] result = null;
+                          if (resultCode == RESULT_OK && data != null) {
+                              result = WebChromeClient.FileChooserParams.parseResult(resultCode, data);
+                          }
+                          filePathCallback.onReceiveValue(result);
+                          filePathCallback = null;
+                      }
+                      return;
+                  }
+                  super.onActivityResult(requestCode, resultCode, data);
+              }
+
+              @Override
+              public void onBackPressed() {
+                  if (!onHome && webView.canGoBack()) {
+                      webView.goBack();
+                  } else if (!onHome) {
+                      showHome();
+                  } else {
+                      super.onBackPressed();
+                  }
+              }
+
+              /* ---------------- Util ---------------- */
+
+              private String readAsset(String name) {
+                  try (InputStream in = getAssets().open(name)) {
+                      ByteArrayOutputStream out = new ByteArrayOutputStream();
+                      byte[] buf = new byte[4096];
+                      int n;
+                      while ((n = in.read(buf)) > 0) out.write(buf, 0, n);
+                      return out.toString("UTF-8");
+                  } catch (Exception e) {
+                      return null;
+                  }
+              }
+
+              private String httpGet(String urlStr) {
+                  HttpURLConnection c = null;
+                  try {
+                      URL url = new URL(urlStr);
+                      c = (HttpURLConnection) url.openConnection();
+                      c.setInstanceFollowRedirects(true);
+                      c.setConnectTimeout(12000);
+                      c.setReadTimeout(12000);
+                      c.setRequestProperty("Accept", "application/json");
+                      if (c.getResponseCode() / 100 != 2) return null;
+                      ByteArrayOutputStream out = new ByteArrayOutputStream();
+                      try (InputStream in = c.getInputStream()) {
+                          byte[] buf = new byte[4096];
+                          int n;
+                          while ((n = in.read(buf)) > 0) out.write(buf, 0, n);
+                      }
+                      return out.toString("UTF-8");
+                  } catch (Exception e) {
+                      return null;
+                  } finally {
+                      if (c != null) c.disconnect();
+                  }
+              }
+
+              /* ---------------- Cek pembaruan ---------------- */
+
+              private void checkUpdate() {
+                  final String repo = BuildConfig.UPDATE_REPO;
+                  if (TextUtils.isEmpty(repo)) return;
+                  io.execute(() -> {
+                      String body = httpGet("https://api.github.com/repos/" + repo + "/releases/latest");
+                      if (body == null) return;
+                      try {
+                          JSONObject o = new JSONObject(body);
+                          String tag = o.optString("tag_name", "").replace("v", "").trim();
+                          String page = o.optString("html_url", "https://github.com/" + repo + "/releases/latest");
+                          if (isNewer(tag, BuildConfig.VERSION_NAME)) {
+                              ui.post(() -> new AlertDialog.Builder(MainActivity.this)
+                                  .setTitle("Pembaruan tersedia")
+                                  .setMessage("Versi " + tag + " sudah rilis. Unduh sekarang?")
+                                  .setPositiveButton("Unduh", (d, w) -> openExternal(page))
+                                  .setNegativeButton("Nanti", null)
+                                  .show());
+                          }
+                      } catch (Exception ignored) {
+                      }
+                  });
+              }
+
+              private static boolean isNewer(String remote, String local) {
+                  if (TextUtils.isEmpty(remote)) return false;
+                  String[] a = remote.split("\\.");
+                  String[] b = local.split("\\.");
+                  int n = Math.max(a.length, b.length);
+                  for (int i = 0; i < n; i++) {
+                      int x = i < a.length ? safeInt(a[i]) : 0;
+                      int y = i < b.length ? safeInt(b[i]) : 0;
+                      if (x != y) return x > y;
+                  }
+                  return false;
+              }
+
+              private static int safeInt(String s) {
+                  try {
+                      return Integer.parseInt(s.replaceAll("[^0-9]", ""));
+                  } catch (Exception e) {
+                      return 0;
+                  }
+              }
+
+              @Override
+              protected void onDestroy() {
+                  io.shutdownNow();
+                  super.onDestroy();
+              }
+          }
+          CLAUDE_EOF
+
+          cat > app/src/main/res/values/strings.xml <<'CLAUDE_EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <resources>
+              <string name="app_name">APK Khusus</string>
+              <string name="home_title">APK Khusus</string>
+              <string name="home_hint">Pilih layanan yang ingin dibuka</string>
+              <string name="footer">Pondok Pesantren Urwah Bin Zubair</string>
+          </resources>
+          CLAUDE_EOF
+
+          cat > app/src/main/res/values/colors.xml <<'CLAUDE_EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <resources>
+              <color name="brand">#5B1721</color>
+              <color name="brand_dark">#35181B</color>
+              <color name="accent">#F4DFB5</color>
+              <color name="bg">#F7F2ED</color>
+              <color name="white">#FFFFFF</color>
+          </resources>
+          CLAUDE_EOF
+
+          cat > app/src/main/res/values/themes.xml <<'CLAUDE_EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <resources>
+              <style name="AppTheme" parent="@android:style/Theme.Material.Light.NoActionBar">
+                  <item name="android:colorPrimary">@color/brand</item>
+                  <item name="android:colorPrimaryDark">@color/brand_dark</item>
+                  <item name="android:colorAccent">@color/brand</item>
+                  <item name="android:statusBarColor">@color/brand_dark</item>
+                  <item name="android:windowBackground">@color/bg</item>
+              </style>
+          </resources>
+          CLAUDE_EOF
+
+          cat > app/src/main/res/layout/activity_main.xml <<'CLAUDE_EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+              android:layout_width="match_parent"
+              android:layout_height="match_parent"
+              android:orientation="vertical"
+              android:fitsSystemWindows="true"
+              android:background="@color/bg">
+
+              <LinearLayout
+                  android:id="@+id/toolbar"
+                  android:layout_width="match_parent"
+                  android:layout_height="52dp"
+                  android:orientation="horizontal"
+                  android:gravity="center_vertical"
+                  android:background="@color/brand"
+                  android:visibility="gone">
+
+                  <Button
+                      android:id="@+id/btnHome"
+                      android:layout_width="wrap_content"
+                      android:layout_height="match_parent"
+                      android:background="@android:color/transparent"
+                      android:textColor="@color/white"
+                      android:textAllCaps="false"
+                      android:text="‹ Beranda" />
+
+                  <TextView
+                      android:id="@+id/tvTitle"
+                      android:layout_width="0dp"
+                      android:layout_height="wrap_content"
+                      android:layout_weight="1"
+                      android:gravity="center"
+                      android:maxLines="1"
+                      android:ellipsize="end"
+                      android:textColor="@color/white"
+                      android:textSize="15sp" />
+
+                  <Button
+                      android:id="@+id/btnBrowser"
+                      android:layout_width="wrap_content"
+                      android:layout_height="match_parent"
+                      android:background="@android:color/transparent"
+                      android:textColor="@color/white"
+                      android:textAllCaps="false"
+                      android:text="Browser" />
+              </LinearLayout>
+
+              <ProgressBar
+                  android:id="@+id/progress"
+                  style="?android:attr/progressBarStyleHorizontal"
+                  android:layout_width="match_parent"
+                  android:layout_height="3dp"
+                  android:max="100"
+                  android:visibility="gone" />
+
+              <WebView
+                  android:id="@+id/webView"
+                  android:layout_width="match_parent"
+                  android:layout_height="0dp"
+                  android:layout_weight="1" />
+          </LinearLayout>
+          CLAUDE_EOF
+
+          cat > app/src/main/res/drawable/ic_launcher.xml <<'CLAUDE_EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <vector xmlns:android="http://schemas.android.com/apk/res/android"
+              android:width="108dp" android:height="108dp"
+              android:viewportWidth="108" android:viewportHeight="108">
+              <path android:fillColor="#5B1721" android:pathData="M0,0h108v108h-108z" />
+              <path android:fillColor="#F4DFB5"
+                  android:pathData="M30,34h20c3,0 5,1 5,4v38c0,-3 -2,-4 -5,-4h-20z" />
+              <path android:fillColor="#F4DFB5"
+                  android:pathData="M78,34h-20c-3,0 -5,1 -5,4v38c0,-3 2,-4 5,-4h20z" />
+              <path android:fillColor="#FFFFFF" android:pathData="M52,30h4v50h-4z" />
+          </vector>
+          CLAUDE_EOF
+
+          cat > app/src/main/assets/menu.json <<'CLAUDE_EOF'
+          {
+            "title": "APK Khusus",
+            "hint": "Pilih layanan yang ingin dibuka",
+            "footer": "Pondok Pesantren Urwah Bin Zubair",
+            "items": [
+              {
+                "title": "Layanan 1",
+                "subtitle": "Buka layanan pertama",
+                "icon": "📘",
+                "url": "https://script.google.com/a/macros/urwahbinzubair.sch.id/s/AKfycbwd7kX0i4R_X9und69OHqj3vph1XmCGMetLLYsvZCaQwFaUS8CNnLbhyn9LWQnpSeZbDg/exec",
+                "open": "webview"
+              },
+              {
+                "title": "Layanan 2",
+                "subtitle": "Buka layanan kedua",
+                "icon": "📝",
+                "url": "https://script.google.com/a/macros/urwahbinzubair.sch.id/s/AKfycbz6qhhL9Ylsl9MKJIVGNwQ-tGZnYTUAFNLQw1Xx5m7JJLus80Zy_eUoD4BAAi4cv5Zx/exec",
+                "open": "webview"
+              }
+            ]
+          }
+          CLAUDE_EOF
+
+          echo '--- daftar berkas ---'
+          find . -path ./.git -prune -o -type f -print | sort
+
+      - name: Siapkan keystore
+        id: ks
+        env:
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+        run: |
+          if [ -n "$KEYSTORE_BASE64" ]; then
+            echo "$KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/release.jks"
+            echo "path=$RUNNER_TEMP/release.jks" >> "$GITHUB_OUTPUT"
+          else
+            echo "path=" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build APK
+        env:
+          KEYSTORE_FILE: ${{ steps.ks.outputs.path }}
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+          MENU_URL: ${{ vars.MENU_URL }}
+          UPDATE_REPO: ${{ github.repository }}
+        run: |
+          if [ -n "$KEYSTORE_FILE" ]; then
+            gradle assembleRelease -PMENU_URL="$MENU_URL" -PUPDATE_REPO="$UPDATE_REPO" --no-daemon
+          else
+            gradle assembleDebug -PMENU_URL="$MENU_URL" -PUPDATE_REPO="$UPDATE_REPO" --no-daemon
+          fi
+          find app/build/outputs/apk -name "*.apk" -exec cp {} APK-Khusus.apk \;
+          ls -la APK-Khusus.apk
+
+      - name: Simpan APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: APK-Khusus
+          path: APK-Khusus.apk
+
+      - name: Publikasikan ke Releases
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: APK-Khusus.apk
